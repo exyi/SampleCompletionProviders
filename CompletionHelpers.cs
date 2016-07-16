@@ -11,6 +11,7 @@ namespace SampleCompletionProviders
 {
     public static class CompletionHelpers
     {
+        // unfortunately current node is not in the CompletionContext, we have to find it ourselves
         public static MemberAccessExpressionSyntax GetCurrentMemberAccess(this SyntaxNode node, int currentPosition)
         {
             var allNodes = node.DescendantNodes(n => n.FullSpan.Contains(currentPosition - 1)); // all nodes that contain currentPosition

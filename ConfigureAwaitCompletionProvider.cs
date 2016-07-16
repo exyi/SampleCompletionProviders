@@ -43,9 +43,6 @@ namespace SampleCompletionProviders
             
         }
 
-        // unfortunately current node is not in the CompletionContext, we have to find it ourselves
-        private 
-
         public override async Task<CompletionDescription> GetDescriptionAsync(Document document, CompletionItem item, CancellationToken cancellationToken)
         {
             return CompletionDescription.Create(ImmutableArray.Create(new TaggedText[] {

@@ -36,18 +36,18 @@ namespace SampleCompletionProviders
             var target = node.Expression;
             var targetType = model.GetTypeInfo(target).Type;
             if (targetType == null) return;
-            // if type is bool -> 'not' complete
+            // if type is bool -> 'not' suggestion
             if (targetType.SpecialType == SpecialType.System_Boolean)
             {
-                context.AddItem(CompletionItem.Create("not", rules: CompletionItemRules.Create()));
+                context.AddItem(CompletionItem.Create("not", rules: CompletionItemRules.Create(), tags: ImmutableArray.Create(new[] { "Snippet" })));
             }
-            // if void -> return
+            // if void -> 'return' snippet
             else if (targetType.SpecialType == SpecialType.System_Void)
             {
                 // TODO: here it should consider return type of current method, but it is not that easy (yield, anonymous method, async)
                 // roslyn does that, but it is internal interface ITypeInferenceService specifically CSharpTypeInferenceService.TypeInferrer.InferTypeForReturnStatement method
                 // it is easy to call it by reflection, but this project is an sample how to do stuff nicely ;)
-                context.AddItem(CompletionItem.Create("return"));
+                context.AddItem(CompletionItem.Create("return", tags: ImmutableArray.Create(new[] { "Snippet" })));
             }
         }
 

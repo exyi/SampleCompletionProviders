@@ -15,7 +15,7 @@ using System.Reflection;
 namespace SampleCompletionProviders
 {
 	[ExportCompletionProvider(nameof(ReflectionGetMemberCompletionProvider), LanguageNames.CSharp)]
-	class ReflectionGetMemberCompletionProvider : CompletionProvider
+	public class ReflectionGetMemberCompletionProvider : CompletionProvider
 	{
 		public ReflectionGetMemberCompletionProvider()
 		{
@@ -71,14 +71,30 @@ namespace SampleCompletionProviders
 		}
 		const string InsertionTextKey = "InsertionText/914D9212-A782-45C9-970F-405B732E10B5"; // hopefully unique id
 
-		public CompletionItem CreateCompletionItem(string insertionText, string descriptionText) =>
+		public CompletionItem CreateCompletionItem(string insertionText, string descriptionText, string[] tags) =>
 			CompletionItem.Create(descriptionText,
 				properties: ImmutableDictionary<string, string>.Empty.Add(InsertionTextKey, insertionText), // add custom insertion text property to be used in GetChangeAsync
+                tags: ImmutableArray.Create(tags),
 				rules: CompletionItemRules.Create(
                     // allow usage of open paren while writing the identifier
                     filterCharacterRules: ImmutableArray<CharacterSetModificationRule>.Empty.Add(CharacterSetModificationRule.Create(CharacterSetModificationKind.Add, '(')),
 				    commitCharacterRules: ImmutableArray<CharacterSetModificationRule>.Empty.Add(CharacterSetModificationRule.Create(CharacterSetModificationKind.Remove, '('))
 			));
+
+        public string[] GetTagsForSymbol(ISymbol symbol)
+        {
+            return new[]
+            {
+                symbol is IMethodSymbol ? "Method" :
+                symbol is IPropertySymbol ? "Property" :
+                symbol is IFieldSymbol ? "Field":
+                symbol is ITypeSymbol ? "Class" : "Local", // use Local for unknown type
+                symbol.DeclaredAccessibility == Accessibility.Public ? "Public" :
+                symbol.DeclaredAccessibility == Accessibility.Private ? "Private" :
+                symbol.DeclaredAccessibility == Accessibility.Internal ? "Internal" :
+                "Protected" // everything else it protected
+            };
+        }
 
 		public ITypeSymbol TryFindResultType(ExpressionSyntax expression, SemanticModel model)
 		{
@@ -98,9 +114,9 @@ namespace SampleCompletionProviders
 				.SelectMany(g =>
 				{
                     // if only one method of the name, don't have to put arguments here
-					if (g.Count() == 1) return new[] { CreateCompletionItem(FormatCompletion(g.First(), false, model, filePosition), GetDisplayText(g.First(), model, filePosition)) };
+					if (g.Count() == 1) return new[] { CreateCompletionItem(FormatCompletion(g.First(), false, model, filePosition), GetDisplayText(g.First(), model, filePosition), GetTagsForSymbol(g.First().MemberSymbol)) };
                     // else put parameters here
-					else return g.Select(c => CreateCompletionItem(FormatCompletion(c, true, model, filePosition), GetDisplayText(c, model, filePosition)));
+					else return g.Select(c => CreateCompletionItem(FormatCompletion(c, true, model, filePosition), GetDisplayText(c, model, filePosition), GetTagsForSymbol(c.MemberSymbol)));
 				});
 		}
 
