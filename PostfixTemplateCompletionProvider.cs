@@ -13,14 +13,47 @@ using System.Collections.Immutable;
 using Microsoft.CodeAnalysis.Formatting;
 using Microsoft.CodeAnalysis.Options;
 using Microsoft.CodeAnalysis.Text;
+using System.IO;
+using Microsoft.VisualStudio.LanguageServices;
 
 namespace SampleCompletionProviders
 {
+    public interface IPostfixSnippet
+    {
+        CompletionItem GetCompletion(CompletionContext context, ExpressionSyntax targetExpression, ITypeSymbol targetType, SemanticModel model);
+        SyntaxNode ChangeTree(Document doc, SemanticModel model, MemberAccessExpressionSyntax memberAccess, char? commitKey);
+    }
+
+    public interface IWorkspaceUpdatingSnippet : IPostfixSnippet
+    {
+        void Update(Document doc, ExpressionSyntax targetExpression, char? commitKey);
+    }
+
     [ExportCompletionProvider(nameof(PostfixTemplateCompletionProvider), LanguageNames.CSharp)]
     public class PostfixTemplateCompletionProvider : CompletionProvider
     {
-        public PostfixTemplateCompletionProvider()
+        private const string CurrentSnipperProperty = "CurrentSnippetType[1e730fc3-76c0-45ba-8da0-a60fdf8d3f9d]";
+
+        private IEnumerable<IPostfixSnippet> snippets;
+        private readonly VisualStudioWorkspace workspace;
+
+        [ImportingConstructor]
+        public PostfixTemplateCompletionProvider(
+            [ImportMany] IEnumerable<IPostfixSnippet> snippets,
+            VisualStudioWorkspace workspace)
         {
+            this.snippets = snippets;
+            this.workspace = workspace;
+            workspace.WorkspaceChanged += Workspace_WorkspaceChanged;
+        }
+        Action<Workspace, Solution> ll;
+        private void Workspace_WorkspaceChanged(object sender, WorkspaceChangeEventArgs e)
+        {
+            if (ll != null)
+            {
+                ll.Invoke(workspace, e.NewSolution);
+                ll = null;
+            }
         }
 
         public override async Task ProvideCompletionsAsync(CompletionContext context)
@@ -36,18 +69,14 @@ namespace SampleCompletionProviders
             var target = node.Expression;
             var targetType = model.GetTypeInfo(target).Type;
             if (targetType == null) return;
-            // if type is bool -> 'not' suggestion
-            if (targetType.SpecialType == SpecialType.System_Boolean)
+
+            foreach (var ss in snippets)
             {
-                context.AddItem(CompletionItem.Create("not", rules: CompletionItemRules.Create(), tags: ImmutableArray.Create(new[] { "Snippet" })));
-            }
-            // if void -> 'return' snippet
-            else if (targetType.SpecialType == SpecialType.System_Void)
-            {
-                // TODO: here it should consider return type of current method, but it is not that easy (yield, anonymous method, async)
-                // roslyn does that, but it is internal interface ITypeInferenceService specifically CSharpTypeInferenceService.TypeInferrer.InferTypeForReturnStatement method
-                // it is easy to call it by reflection, but this project is an sample how to do stuff nicely ;)
-                context.AddItem(CompletionItem.Create("return", tags: ImmutableArray.Create(new[] { "Snippet" })));
+                if (ss.GetCompletion(context, target, targetType, model) is CompletionItem ci)
+                {
+                    if (ci.Tags.Length == 0) ci = ci.AddTag("Snippet");
+                    context.AddItem(ci.AddProperty(CurrentSnipperProperty, ss.GetType().ToString()));
+                }
             }
         }
 
@@ -64,73 +93,83 @@ namespace SampleCompletionProviders
             var model = await document.GetSemanticModelAsync();
             var tree = model.SyntaxTree;
             var root = tree.GetRoot();
-            SyntaxNode newRoot = null;
             var memberAccess = tree.GetRoot().GetCurrentMemberAccess(item.Span.Start);
+            if (!item.Properties.TryGetValue(CurrentSnipperProperty, out var currentSnippet)) return CompletionChange.Create(ImmutableArray<TextChange>.Empty);
+
             if (memberAccess != null)
             {
-                var target = memberAccess.Expression;
-                if (item.DisplayText == "not") // not template expansion
+                var snip = snippets.FirstOrDefault(s => s.GetType().ToString() == currentSnippet);
+                var newRoot = snip.ChangeTree(document, model, memberAccess, commitKey);
+                string expectedText = null;
+                TextSpan nodeSpan = default(TextSpan);
+                if (snip is IWorkspaceUpdatingSnippet wsnip)
                 {
-                    // when it is commited with '.' take the parent to get to the top node
-                    if (commitKey == '.' && memberAccess.Parent is MemberAccessExpressionSyntax) memberAccess = (MemberAccessExpressionSyntax)memberAccess.Parent;
-                    ExpressionSyntax newNode = SyntaxFactory.PrefixUnaryExpression(SyntaxKind.LogicalNotExpression, target.WithoutTrivia());
-
-                    // insert parenthesis when commited with dot
-                    // and copy trivia (whitespaces) from the original node
-                    if (commitKey == '.') newNode = SyntaxFactory.ParenthesizedExpression(newNode).WithTriviaFrom(memberAccess);
-                    else newNode = newNode.WithTriviaFrom(memberAccess);
-
-                    newRoot = root.ReplaceNode(memberAccess, newNode);
+                    ll = async (workspace, solution) => {
+                        var doc = solution.GetDocument(document.Id);
+                        if ((await doc.GetTextAsync()).ToString() == expectedText)
+                            wsnip.Update(doc, (await doc.GetSyntaxRootAsync()).FindNode(nodeSpan) as ExpressionSyntax, commitKey);
+                    };
                 }
-                else if (item.DisplayText == "return") // return teplace expansion
-                {
-                    var statement = memberAccess.Ancestors().OfType<StatementSyntax>().FirstOrDefault();
-                    if (statement != null)
-                    {
-                        // insert return statement after current statement
-                        SyntaxNode oldNode;
-                        BlockSyntax block;
-                        int index;
-                        if (statement.Parent is BlockSyntax)
-                        {
-                            // after current statement in the block
-                            oldNode = block = statement.Parent as BlockSyntax;
-                            index = block.Statements.IndexOf(statement) + 1;
-                            block = block.ReplaceNode(statement, FixStatement(statement.ReplaceNode(memberAccess, (memberAccess as MemberAccessExpressionSyntax).Expression))).WithTriviaFrom(memberAccess);
-                        }
-                        else
-                        {
-                            // if it is not in block, insert one
-                            // if (...) Method().return ---> if (...) { Method(); return; }
-                            oldNode = statement;
-                            block = SyntaxFactory.Block(FixStatement(statement.ReplaceNode(memberAccess, (memberAccess as MemberAccessExpressionSyntax).Expression).WithoutTrivia())).WithTriviaFrom(memberAccess);
-                            index = 1;
-                        }
-                        // insert return to the found or created block
-                        SyntaxNode newBlock = block.WithStatements(block.Statements.Insert(index, SyntaxFactory.ReturnStatement()))
-                            .WithAdditionalAnnotations(Formatter.Annotation);
-                        newRoot = root.ReplaceNode(oldNode, newBlock);
-                    }
-                }
-                if (newRoot == null) newRoot = root.ReplaceNode(memberAccess, target);
+
+                //if (newRoot == null) newRoot = root.ReplaceNode(memberAccess, memberAccess.Expression);
+                if (newRoot == null) newRoot = root.ReplaceNode(memberAccess, memberAccess.WithName(SyntaxFactory.IdentifierName(item.DisplayText)));
                 // format tree
                 var newTree = tree.WithRootAndOptions(Formatter.Format(newRoot, Formatter.Annotation, document.Project.Solution.Workspace), tree.Options);
                 // return changes done in the new tree
-                var changes = newTree.GetChanges(tree);
-                return CompletionChange.Create(changes.ToImmutableArray(), includesCommitCharacter: false);
+                var changes = newTree.GetChanges(tree).Select(c => TrimWhitespaceChnage(c, tree.GetText())).Select(c => MoveToNode(c, tree.GetText(), memberAccess.Expression.Span)).ToArray();
+                ImmutableArray<TextChange> finalChanges = ImmutableArray.Create(MergeChanges(changes, tree.GetText()));
+                expectedText = tree.GetText().WithChanges(finalChanges).ToString();
+                nodeSpan = MoveSpan(memberAccess.Expression.Span, finalChanges);
+                return CompletionChange.Create(finalChanges, includesCommitCharacter: false);
             }
             return await base.GetChangeAsync(document, item, commitKey, cancellationToken);
         }
-        
-        private StatementSyntax FixStatement(StatementSyntax statement)
+
+        private TextSpan MoveSpan(TextSpan span, ImmutableArray<TextChange> changes)
         {
-            // insert missing semicolon to the statement
-            if (statement is ExpressionStatementSyntax)
+            foreach (var change in changes)
             {
-                var est = statement as ExpressionStatementSyntax;
-                if (est.SemicolonToken.Span.Length == 0) return est.WithSemicolonToken(SyntaxFactory.Token(SyntaxKind.SemicolonToken));
+                if (change.Span.End < span.Start) span = new TextSpan(span.Start - (change.Span.Length - change.NewText.Length), span.Length);
+                // TODO: else
             }
-            return statement;
+            return span;
+        }
+
+        private TextChange MergeChanges(TextChange[] change, SourceText text)
+        {
+            if (change.Length == 1) return change[0];
+            Array.Sort(change, (a, b) => a.Span.Start.CompareTo(b.Span.Start));
+            var span = TextSpan.FromBounds(change.First().Span.Start, change.Last().Span.Start);
+            int lastSpan = span.Start;
+            var sb = new StringWriter();
+            foreach (var c in change)
+            {
+                text.Write(sb, TextSpan.FromBounds(lastSpan, c.Span.Start));
+                sb.Write(c.NewText);
+                lastSpan = c.Span.End;
+            }
+            return new TextChange(span, sb.ToString());
+        }
+
+        private TextChange TrimWhitespaceChnage(TextChange change, SourceText text)
+        {
+            if (change.Span.Length == 0) return change;
+
+            var start = change.Span.Start;
+            var end = change.Span.End;
+            if (char.IsWhiteSpace(text[start - 1])) while (char.IsWhiteSpace(text[start]) && start < end) start++;
+            while (char.IsWhiteSpace(text[end - 1]) && start < end) end--;
+            return new TextChange(TextSpan.FromBounds(start, end), change.NewText.Trim());
+        }
+
+        private TextChange MoveToNode(TextChange change, SourceText text, TextSpan home)
+        {
+            if (change.Span.Length > 0) return change;
+
+            var position = change.Span.Start;
+            var direction = home.Start.CompareTo(position);
+            while (!home.Contains(position) && char.IsWhiteSpace(text[position + direction])) position += direction;
+            return new TextChange(new TextSpan(position, 0), change.NewText);
         }
     }
 }

@@ -40,7 +40,6 @@ namespace SampleCompletionProviders
             catch(Exception ex)
             {
             }
-            
         }
 
         public override async Task<CompletionDescription> GetDescriptionAsync(Document document, CompletionItem item, CancellationToken cancellationToken)
