@@ -22,8 +22,8 @@ namespace SampleCompletionProviders
 			{
 				foreach (var b in blocks)
 				{
-					yield return b.CodeSpan;
-					yield return b.GeneratedCodeSpan;
+					if (b.CodeSpan != null) yield return b.CodeSpan;
+					if (b.GeneratedCodeSpan != null) yield return b.GeneratedCodeSpan;
 				}
 			}
 		}
@@ -40,9 +40,13 @@ namespace SampleCompletionProviders
 		private void Buffer_Changed(object sender, TextContentChangedEventArgs e)
 		{
 			if (isRegenerating) return;
-			var isCritical = trackingspans.Select(s => s.GetSpan(e.Before))
-				.SelectMany(s => new[] { s.Start, s.End })
-				.Any(p => e.Changes.Any(v => v.OldSpan.Contains(p.Position)));
+
+            bool containsCommenter(ITextSnapshot snapshot, Span span) =>
+                snapshot.GetText(Span.FromBounds(Math.Max(0, span.Start - 3), Math.Min(span.End, snapshot.Length))).Contains("//`");
+            var isCritical = trackingspans.Select(s => s.GetSpan(e.Before))
+                .SelectMany(s => new[] { s.Start, s.End })
+                .Any(p => e.Changes.Any(v => v.OldSpan.Contains(p.Position))) ||
+                e.Changes.Any(c => containsCommenter(e.After, c.NewSpan) || containsCommenter(e.Before, c.OldSpan));
 			if (isCritical)
 			{
 				RefreshBlocks(e.After);
@@ -53,11 +57,11 @@ namespace SampleCompletionProviders
 				{
 					foreach (CodeBlock block in blocks)
 					{
-						if (block.CodeSpan.GetSpan(e.After).Contains(change.NewPosition))
+						if (block.CodeSpan.GetSpan(e.After).Contains(change.NewPosition - 1))
 						{
 							block.IsDirty = true;
 						}
-						if (block.GeneratedCodeSpan.GetSpan(e.After).Contains(change.NewPosition))
+						if (block.GeneratedCodeSpan?.GetSpan(e.After).Contains(change.NewPosition) == true)
 						{
 							// TODO: don't edit generated code
 						}
@@ -96,9 +100,10 @@ namespace SampleCompletionProviders
 						var codeLineEnd = i;
 						if (lines[i].GetText().Trim().Equals("#region " + GeneratedCodeRegionName))
 						{
-							while (!lines[++i].GetText().Equals("#endregion " + GeneratedCodeRegionName)) ;
+							while (++i < lines.Length && !lines[i].GetText().Trim().Replace(" ", "").Equals("#endregion//" + GeneratedCodeRegionName.Replace(" ", ""))) ;
+                            if (i < lines.Length) i++;
 						}
-						AddBlock(lines.Skip(blockFromLine).Take(blockFromLine - codeLineEnd).ToArray(), lines.Skip(codeLineEnd).Take(i - codeLineEnd).ToArray());
+						AddBlock(lines.Skip(blockFromLine).Take(codeLineEnd - blockFromLine).ToArray(), lines.Skip(codeLineEnd).Take(i - codeLineEnd).ToArray());
 						blockFromLine = -1;
 					}
 				}
@@ -111,10 +116,10 @@ namespace SampleCompletionProviders
 			var gencodeSpan = gencodeLines.Length > 0 ? new SnapshotSpan(gencodeLines.First().Start, gencodeLines.Last().End) : (SnapshotSpan?)null;
 			blocks.Add(new CodeBlock
 			{
-				CodeSpan = span.Snapshot.CreateTrackingSpan(span, SpanTrackingMode.EdgeExclusive),
+				CodeSpan = span.Snapshot.CreateTrackingSpan(span, SpanTrackingMode.EdgeInclusive),
 				Code = GetCodeFromLines(lines.Select(s => s.Extent)),
 				GeneratedCode = gencodeSpan?.GetText(),
-				GeneratedCodeSpan = gencodeSpan?.Snapshot?.CreateTrackingSpan(gencodeSpan.Value, SpanTrackingMode.EdgeExclusive),
+				GeneratedCodeSpan = gencodeSpan?.Snapshot?.CreateTrackingSpan(gencodeSpan.Value, SpanTrackingMode.EdgePositive),
 				IsDirty = true
 			});
 		}
@@ -147,22 +152,23 @@ namespace SampleCompletionProviders
 			}
 		}
 
-		void RegenerateBlock(CodeBlock block, ITextSnapshot snapshot)
-		{
-			var codeSpan = block.CodeSpan.GetSpan(snapshot);
+        void RegenerateBlock(CodeBlock block, ITextSnapshot snapshot)
+        {
+            var codeSpan = block.CodeSpan.GetSpan(snapshot);
 			block.Code = GetCodeFromLines(snapshot.Lines.Select(l => l.Extent.Intersection(codeSpan)).Where(s => s != null).Select(s => s.Value));
 			var generatedCode = TheCodeGenerator.Compile(block.Code, snapshot);
-			ITextSnapshot newSnapshot;
-			if (block.GeneratedCodeSpan != null)
-			{
-				newSnapshot = buffer.Replace(block.GeneratedCodeSpan.GetSpan(buffer.CurrentSnapshot), generatedCode);
-			}
-			else
-			{
-				newSnapshot = buffer.Insert(codeSpan.Start, generatedCode);
-			}
-			block.GeneratedCode = generatedCode;
-			block.GeneratedCodeSpan = newSnapshot.CreateTrackingSpan(newSnapshot.Version.Changes.Single().NewSpan, SpanTrackingMode.EdgeExclusive);
+            if (generatedCode != null)
+            {
+                var oldSnapshot = buffer.CurrentSnapshot;
+                ITextSnapshot newSnapshot =
+                    block.GeneratedCodeSpan != null ?
+                    buffer.Replace(block.GeneratedCodeSpan.GetSpan(buffer.CurrentSnapshot), generatedCode) :
+                    newSnapshot = buffer.Insert(codeSpan.End, generatedCode);
+                block.GeneratedCode = generatedCode;
+                block.GeneratedCodeSpan = newSnapshot.CreateTrackingSpan(block.GeneratedCodeSpan?.GetSpan(oldSnapshot).Start ?? codeSpan.End, generatedCode.Length, SpanTrackingMode.EdgeExclusive);
+            }
+
+            block.IsDirty = false;
 		}
 
 		class CodeBlock

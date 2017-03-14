@@ -14,7 +14,7 @@ namespace SampleCompletionProviders
 {
 	[Export(typeof(IVsTextViewCreationListener))]
 	[Name(nameof(TextViewCreationListener))]
-	[ContentType("CSharp")]
+	[ContentType("any")]
 	[TextViewRole(PredefinedTextViewRoles.Interactive)]
 	public class TextViewCreationListener : IVsTextViewCreationListener
 	{
